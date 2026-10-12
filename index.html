@@ -106,7 +106,13 @@ body.alarm .timer{animation:flash .6s infinite alternate}
 .court{background:var(--card); border:1px solid var(--line); border-left:8px solid var(--men); border-radius:14px; padding:12px; margin-bottom:12px; box-shadow:var(--shadow)}
 .court.mixed{border-left-color:var(--mixed)}
 .court.women{border-left-color:var(--women)}
-.court.bad{border-left-color:var(--warn)}
+.court.bad,.court.uneven{border-left-color:var(--warn)}
+.court.uneven .tag{color:var(--warn); border-color:var(--warn)}
+.arch{border:1px solid var(--line); border-radius:12px; padding:0 12px; margin-bottom:8px}
+.arch summary{justify-content:space-between; gap:8px}
+.arch summary small{color:var(--muted); font-weight:400}
+.note{font-size:.92rem; padding:10px 12px; border-radius:10px; background:var(--bg); border:1px solid var(--line); margin:8px 0}
+.note.warn{border-color:var(--warn); color:var(--warn)}
 .court-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px}
 .court-head b{font-size:1.25rem}
 .tag{font-size:.85rem; font-weight:700; padding:3px 10px; border-radius:999px; border:1px solid var(--line)}
@@ -234,6 +240,17 @@ nav.tabs button.active{color:var(--primary); box-shadow:inset 0 3px 0 var(--prim
         <label class="switch"><input type="checkbox" id="optLate" data-opt="lateFair"><span class="track"></span></label>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Dữ liệu &amp; sao lưu</h2>
+      <p class="hint">Mọi thay đổi được tự động lưu trong máy này. Sao lưu ra tệp để không mất dữ liệu khi xoá trình duyệt hoặc đổi điện thoại. Trên iPhone, chọn <b>“Lưu vào Tệp”</b> trong bảng chia sẻ.</p>
+      <div id="backupInfo"></div>
+      <div class="row wrap">
+        <button class="btn primary grow" data-act="backup">💾 Sao lưu ra tệp</button>
+        <button class="btn grow" data-act="restore">📂 Khôi phục từ tệp</button>
+      </div>
+      <input type="file" id="restoreFile" accept=".json,application/json,text/plain" hidden>
+    </div>
   </section>
 
   <!-- ============ TAB LƯỢT ĐẤU ============ -->
@@ -263,8 +280,12 @@ nav.tabs button.active{color:var(--primary); box-shadow:inset 0 3px 0 var(--prim
       <h2>Lịch sử các lượt</h2>
       <div id="histBox"></div>
     </div>
-    <button class="btn danger block" data-act="newSession">⟳ Bắt đầu buổi mới</button>
-    <p class="hint" style="text-align:center">Xoá lịch sử trận, giữ nguyên danh sách người chơi.</p>
+    <button class="btn danger block" data-act="newSession">⟳ Kết thúc buổi &amp; bắt đầu buổi mới</button>
+    <p class="hint" style="text-align:center">Buổi hiện tại được cất vào “Các buổi trước”, giữ nguyên danh sách người chơi.</p>
+    <div class="card" style="margin-top:12px">
+      <h2>Các buổi trước</h2>
+      <div id="archBox"></div>
+    </div>
   </section>
 </main>
 
@@ -297,6 +318,8 @@ const DEF = () => ({
   settings: {courts:2, minutes:12, allowWD:false, showScores:false, lateFair:true, theme:'auto'},
   rounds: [],             // {n, t, courts:[{a:[id,id], b:[id,id], sa, sb}], rest:[id...]}
   timer: {endAt:null, remaining:null},
+  archive: [],            // các buổi đã kết thúc: {id, start, end, rounds, people:{id:{name,gender}}}
+  lastBackup: null,
   tab: 'players'
 });
 let S = load();
@@ -309,7 +332,9 @@ function load(){
       const b = DEF();
       return Object.assign(b, d, {
         settings: Object.assign(b.settings, d.settings || {}),
-        timer: Object.assign(b.timer, d.timer || {})
+        timer: Object.assign(b.timer, d.timer || {}),
+        rounds: Array.isArray(d.rounds) ? d.rounds : [],
+        archive: Array.isArray(d.archive) ? d.archive : []
       });
     }
   }catch(e){}
@@ -335,11 +360,11 @@ function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('sh
 
 /* ================= THỐNG KÊ (tính lại từ lịch sử lượt) =================
    Mọi số liệu đều suy ra từ S.rounds nên Hoàn tác / đổi người luôn nhất quán. */
-function computeStats(){
+function computeStats(rounds = S.rounds, ids = S.players.map(p => p.id)){
   const st = {}, partner = {}, opp = {};
   const get = id => st[id] || (st[id] = {games:0, rests:0, streak:0, wins:0, losses:0, diff:0});
-  S.players.forEach(p => get(p.id));
-  for(const r of S.rounds){
+  ids.forEach(get);
+  for(const r of rounds){
     for(const c of r.courts){
       [...c.a, ...c.b].forEach(id => get(id).games++);
       partner[pk(c.a[0],c.a[1])] = (partner[pk(c.a[0],c.a[1])]||0) + 1;
@@ -357,7 +382,7 @@ function computeStats(){
   // Số lượt nghỉ liên tiếp hiện tại: đếm ngược từ lượt cuối, dừng khi đã ra sân hoặc vắng mặt
   for(const id in st){
     let k = 0;
-    for(let i=S.rounds.length-1; i>=0; i--){ if(S.rounds[i].rest.includes(id)) k++; else break; }
+    for(let i=rounds.length-1; i>=0; i--){ if(rounds[i].rest.includes(id)) k++; else break; }
     st[id].streak = k;
   }
   return {st, partner, opp, get};
@@ -375,46 +400,49 @@ function priorityOrder(players, stats){
 
 /* ================= THUẬT TOÁN XẾP LƯỢT ================= */
 
-/* Bước 3 — chọn người ra sân sao cho số nữ CHẴN và ghép được sân hợp lệ.
-   Với mỗi số nữ f khả thi (chẵn, đủ nam/nữ, ≤ 2·số sân nếu không cho đôi nữ),
-   lấy f nữ + (N−f) nam đứng đầu danh sách ưu tiên; chọn phương án có tổng thứ hạng
-   ưu tiên nhỏ nhất → nếu thứ tự tự nhiên đã chẵn thì giữ nguyên, nếu lẻ thì chỉ thay 1 người.
-   Nếu không đủ người/không khả thi thì giảm số sân. */
-function chooseSelection(order, courts){
+/* Bước 3 — chọn người ra sân.
+   Mức nới lỏng (level) dùng khi số nam/nữ có mặt không cho phép xếp đủ sân theo luật chuẩn:
+     0 = chuẩn: số nữ chẵn, đôi nữ chỉ khi được bật trong Cài đặt
+     1 = tự cho phép sân đôi nữ (khi thiếu nam)
+     2 = cho phép sân lệch giới, số nữ lẻ (khi không còn cách nào khác)
+   Với mỗi số nữ f hợp lệ, lấy f nữ + (N−f) nam đứng đầu danh sách ưu tiên; chọn phương án có
+   tổng thứ hạng ưu tiên nhỏ nhất → thứ tự tự nhiên đã chẵn thì giữ nguyên, lẻ thì chỉ thay 1 người. */
+function chooseSelection(order, c, level){
+  const N = 4 * c;
+  if(order.length < N) return null;
   const rank = new Map(order.map((p,i) => [p.id, i]));
   const F = order.filter(p => p.gender === 'F'), M = order.filter(p => p.gender !== 'F');
-  for(let c = courts; c >= 1; c--){
-    const N = 4 * c;
-    if(order.length < N) continue;
-    let best = null;
-    for(let f = 0; f <= N; f += 2){
-      if(f > F.length || N - f > M.length) continue;
-      if(!S.settings.allowWD && f > 2 * c) continue;   // không cho đôi nữ: mỗi sân tối đa 2 nữ
-      const sel = [...F.slice(0,f), ...M.slice(0,N-f)];
-      const cost = sel.reduce((s,p) => s + rank.get(p.id), 0);
-      if(!best || cost < best.cost) best = {sel, cost, c};
-    }
-    if(best) return best;
+  const wd = S.settings.allowWD || level >= 1;
+  let best = null;
+  for(let f = 0; f <= N; f += (level >= 2 ? 1 : 2)){
+    if(f > F.length || N - f > M.length) continue;
+    if(!wd && f > 2 * c) continue;                    // không cho đôi nữ: mỗi sân tối đa 2 nữ
+    const sel = [...F.slice(0,f), ...M.slice(0,N-f)];
+    const cost = sel.reduce((s,p) => s + rank.get(p.id), 0) + (f % 2 ? N : 0);
+    if(!best || cost < best.cost) best = {sel, cost, c, level};
   }
-  return null;
+  return best;
 }
 
 /* Bước 4 — ghép đội: thử các cách chia sân/đồng đội, chọn cách có điểm phạt thấp nhất.
    Phạt: +10 × số lần đã là đồng đội, +2 × số lần đã đối đầu, +1 nếu là sân đôi nữ
    (để ưu tiên đôi nam nữ khi có 4 nữ). Sân hợp lệ: 0 nữ (đôi nam), 2 nữ mỗi đội 1 nữ
    (đôi nam nữ), hoặc 4 nữ (đôi nữ, nếu được bật). */
-function bestPairing(ids, stats){
+function bestPairing(ids, stats, level = 0){
   const P = (a,b) => stats.partner[pk(a,b)] || 0;
   const O = (a,b) => stats.opp[pk(a,b)] || 0;
-  const allowWD = S.settings.allowWD;
+  const allowWD = S.settings.allowWD || level >= 1;
   function courtCost(a0,a1,b0,b1){
     const fa = isF(a0) + isF(a1), fb = isF(b0) + isF(b1), f = fa + fb;
-    if(f % 2) return Infinity;
+    let extra = 0;
+    if(f % 2){                                        // sân lệch: 1 nữ hoặc 3 nữ
+      if(level < 2) return Infinity;
+      extra = 50;                                     // phạt nặng để số sân lệch là ít nhất
+    }
     if(f === 2 && fa !== 1) return Infinity;          // 2 nữ thì mỗi đội đúng 1 nữ
     if(f === 4 && !allowWD) return Infinity;
-    let cost = 10 * (P(a0,a1) + P(b0,b1)) + 2 * (O(a0,b0) + O(a0,b1) + O(a1,b0) + O(a1,b1));
-    if(f === 4) cost += 1;
-    return cost;
+    if(f === 4) extra += 1;
+    return extra + 10 * (P(a0,a1) + P(b0,b1)) + 2 * (O(a0,b0) + O(a0,b1) + O(a1,b0) + O(a1,b1));
   }
 
   // ≤ 3 sân: duyệt toàn bộ (2 sân = 315 cách) có cắt nhánh; chọn ngẫu nhiên đều giữa các cách tốt nhất
@@ -443,25 +471,18 @@ function bestPairing(ids, stats){
     return pick;
   }
 
-  // > 3 sân: dựng một cách hợp lệ rồi leo đồi bằng cách hoán đổi 2 người cùng giới (nhiều lần khởi tạo lại)
-  const c = ids.length / 4;
-  const total = s => { let t=0; for(let i=0;i<c;i++) t += courtCost(s[4*i],s[4*i+1],s[4*i+2],s[4*i+3]); return t; };
-  function construct(){
-    const F = shuffle(ids.filter(isF)), M = shuffle(ids.filter(x => !isF(x)));
-    const f = F.length, w = Math.max(0, f/2 - c), k = f/2 - 2*w, m = c - k - w;
-    const s = [];
-    for(let i=0;i<w;i++) s.push(F.pop(),F.pop(),F.pop(),F.pop());
-    for(let i=0;i<k;i++) s.push(F.pop(),M.pop(),F.pop(),M.pop());
-    for(let i=0;i<m;i++) s.push(M.pop(),M.pop(),M.pop(),M.pop());
-    return s;
-  }
+  // ≥ 4 sân: xuất phát ngẫu nhiên rồi leo đồi bằng cách hoán đổi 2 người bất kỳ (khởi tạo lại nhiều lần).
+  // Sân không hợp lệ được tính phạt rất lớn để quá trình tìm kiếm tự loại bỏ.
+  const c = ids.length / 4, BAD = 1e6;
+  const cc = (a0,a1,b0,b1) => { const v = courtCost(a0,a1,b0,b1); return v === Infinity ? BAD : v; };
+  const total = s => { let t=0; for(let i=0;i<c;i++) t += cc(s[4*i],s[4*i+1],s[4*i+2],s[4*i+3]); return t; };
   let best = null, bestCost = Infinity;
-  for(let restart=0; restart<40; restart++){
-    const s = construct(); let cost = total(s), improved = true;
+  for(let restart=0; restart<60; restart++){
+    const s = shuffle(ids.slice()); let cost = total(s), improved = true;
     while(improved){
       improved = false;
       for(let x=0; x<s.length; x++) for(let y=x+1; y<s.length; y++){
-        if(isF(s[x]) !== isF(s[y]) || Math.floor(x/4) === Math.floor(y/4) && Math.floor(x/2) === Math.floor(y/2)) continue;
+        if(Math.floor(x/2) === Math.floor(y/2)) continue;   // cùng một đội: đổi chỗ không thay đổi gì
         [s[x],s[y]] = [s[y],s[x]];
         const nc = total(s);
         if(nc < cost){ cost = nc; improved = true; } else [s[x],s[y]] = [s[y],s[x]];
@@ -469,6 +490,7 @@ function bestPairing(ids, stats){
     }
     if(cost < bestCost){ bestCost = cost; best = s.slice(); }
   }
+  if(bestCost >= BAD) return null;
   const out = [];
   for(let i=0;i<c;i++) out.push({a:[best[4*i],best[4*i+1]], b:[best[4*i+2],best[4*i+3]]});
   return out;
@@ -479,6 +501,7 @@ function courtType(c){
   if(f === 0) return ['men','Đôi nam'];
   if(f === 4) return ['women','Đôi nữ'];
   if(f === 2 && fa === 1) return ['mixed','Đôi nam nữ'];
+  if(f % 2) return ['uneven', f === 1 ? 'Sân lệch: 1 nữ' : 'Sân lệch: 3 nữ'];
   return ['bad','Lệch giới ⚠'];
 }
 
@@ -488,11 +511,22 @@ function generateRound(){
   if(pres.length < 4){ toast('Cần ít nhất 4 người có mặt'); return; }
   const stats = computeStats();
   const order = priorityOrder(pres, stats);                  // Bước 1–2
-  const pick = chooseSelection(order, S.settings.courts);    // Bước 3
-  if(!pick){ toast('Không xếp được sân hợp lệ với số nam/nữ hiện tại. Thử bật “Cho phép sân đôi nữ”.'); return; }
-  const courts = bestPairing(pick.sel.map(p => p.id), stats); // Bước 4
-  if(!courts){ toast('Không ghép được đội hợp lệ'); return; }
-  const ord = {mixed:0, men:1, women:2, bad:3};
+  // Bước 3–4: giữ nhiều sân nhất có thể; với mỗi số sân thử từ luật chuẩn rồi mới nới lỏng dần
+  let pick = null, courts = null;
+  for(let c = Math.min(S.settings.courts, Math.floor(pres.length / 4)); c >= 1 && !courts; c--){
+    for(let level = 0; level <= 2 && !courts; level++){
+      pick = chooseSelection(order, c, level);
+      // Ngày đông nữ: nếu cấm đôi nữ khiến phải bỏ qua nhiều người đang được ưu tiên (lệch hơn ~1 lượt đổi người)
+      // thì tự cho phép đôi nữ để giữ công bằng số trận.
+      if(level === 0 && !S.settings.allowWD){
+        const p1 = chooseSelection(order, c, 1);
+        if(p1 && (!pick || pick.cost - p1.cost >= 4 * c)){ pick = p1; level = 1; }
+      }
+      if(pick) courts = bestPairing(pick.sel.map(p => p.id), stats, level);
+    }
+  }
+  if(!courts){ toast('Không ghép được đội'); return; }
+  const ord = {mixed:0, men:1, women:2, uneven:3, bad:4};
   courts.sort((x,y) => ord[courtType(x)[0]] - ord[courtType(y)[0]]);
   courts.forEach(c => { c.sa = null; c.sb = null; });
   const sel = new Set(pick.sel.map(p => p.id));
@@ -501,6 +535,8 @@ function generateRound(){
   save(); renderAll();
   window.scrollTo({top:0, behavior:'smooth'});
   if(pick.c < S.settings.courts) toast(`Chỉ đủ người cho ${pick.c} sân`);
+  else if(pick.level === 2) toast('Lượt này có sân lệch nam/nữ vì số nam/nữ không chia đều được');
+  else if(pick.level === 1) toast('Lượt này có sân đôi nữ vì không đủ nam');
 }
 
 /* Người đến muộn: nâng số trận tính toán lên bằng mức thấp nhất của những người đang có mặt */
@@ -623,6 +659,7 @@ function renderPlayers(){
   $('#optWD').checked = S.settings.allowWD;
   $('#optScores').checked = S.settings.showScores;
   $('#optLate').checked = S.settings.lateFair;
+  renderBackupInfo();
 }
 
 function chipBtn(id, attrs){
@@ -658,7 +695,104 @@ function renderRound(){
   box.innerHTML = html;
 }
 
-function renderStats(){ renderStatsTable(); renderRank(); renderHistory(); }
+function renderStats(){ renderStatsTable(); renderRank(); renderHistory(); renderArchive(); }
+
+/* ---------- Lưu trữ các buổi ---------- */
+const fmtDate = t => new Date(t).toLocaleDateString('vi-VN', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'});
+const fmtTime = t => new Date(t).toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'});
+function archiveCurrent(){
+  if(!S.rounds.length) return false;
+  const people = {};
+  S.rounds.forEach(r => [...r.courts.flatMap(c => [...c.a, ...c.b]), ...r.rest].forEach(id => {
+    const p = byId(id); if(p) people[id] = {name:p.name, gender:p.gender};
+  }));
+  S.archive.push({id:uid(), start:S.rounds[0].t, end:Date.now(), rounds:S.rounds, people});
+  return true;
+}
+function archiveSummary(a){
+  const st = computeStats(a.rounds, Object.keys(a.people)).st;
+  const nm = id => (a.people[id] || {}).name || '?';
+  const hasScore = a.rounds.some(r => r.courts.some(c => c.sa != null && c.sb != null && c.sa !== c.sb));
+  const rows = Object.keys(a.people).map(id => ({id, s:st[id]}))
+    .sort((x,y) => (hasScore ? y.s.wins - x.s.wins || y.s.diff - x.s.diff : 0) || y.s.games - x.s.games || nm(x.id).localeCompare(nm(y.id),'vi'));
+  return {st, nm, hasScore, rows};
+}
+function archiveText(a){
+  const {nm, hasScore, rows} = archiveSummary(a);
+  let t = `🏸 Tổng kết buổi ${fmtDate(a.start)} (${fmtTime(a.start)}–${fmtTime(a.end)}) · ${a.rounds.length} lượt\n`;
+  t += rows.map((x,i) => `${i+1}. ${nm(x.id)}: ${x.s.games} trận` + (hasScore ? `, ${x.s.wins}T-${x.s.losses}B (${x.s.diff > 0 ? '+' : ''}${x.s.diff})` : '')).join('\n');
+  return t;
+}
+function renderArchive(){
+  const box = $('#archBox');
+  if(!S.archive.length){ box.innerHTML = '<p class="muted">Chưa có buổi nào được lưu trữ.</p>'; return; }
+  box.innerHTML = S.archive.slice().reverse().map(a => {
+    const {st, nm, hasScore, rows} = archiveSummary(a);
+    const g = id => (a.people[id] || {}).gender === 'F' ? 'f' : 'm';
+    return `<details class="arch"><summary><span>${fmtDate(a.start)}<br><small>${fmtTime(a.start)}–${fmtTime(a.end)} · ${a.rounds.length} lượt · ${Object.keys(a.people).length} người</small></span></summary>
+      <table class="tbl"><thead><tr><th>Tên</th><th>Trận</th><th>Nghỉ</th>${hasScore ? '<th>Thắng</th><th>Thua</th><th>HS</th>' : ''}</tr></thead><tbody>
+      ${rows.map(x => `<tr><td class="name"><span class="dot ${g(x.id)}">${gico(g(x.id) === 'f' ? 'F' : 'M')}</span>${esc(nm(x.id))}</td><td><b>${x.s.games}</b></td><td>${x.s.rests}</td>
+        ${hasScore ? `<td>${x.s.wins}</td><td>${x.s.losses}</td><td>${x.s.diff > 0 ? '+' : ''}${x.s.diff}</td>` : ''}</tr>`).join('')}
+      </tbody></table>
+      <details style="margin:6px 0"><summary>Xem từng lượt</summary>
+        ${a.rounds.map(r => `<div class="hint" style="margin:4px 0">${esc(roundText(r, nm))}</div>`).join('')}
+      </details>
+      <div class="row" style="margin:8px 0 12px">
+        <button class="btn grow" data-act="archCopy" data-id="${a.id}">⧉ Sao chép tổng kết</button>
+        <button class="btn danger" data-act="archDel" data-id="${a.id}" aria-label="Xoá buổi này">🗑</button>
+      </div></details>`;
+  }).join('');
+}
+
+/* ---------- Sao lưu / khôi phục ---------- */
+function renderBackupInfo(){
+  const el = $('#backupInfo'); if(!el) return;
+  const nRounds = S.rounds.length + S.archive.reduce((s,a) => s + a.rounds.length, 0);
+  if(!S.lastBackup){
+    el.innerHTML = active().length ? `<div class="note warn">Chưa sao lưu lần nào.</div>` : '';
+    return;
+  }
+  const days = Math.floor((Date.now() - S.lastBackup) / 86400000);
+  const when = `${fmtTime(S.lastBackup)} ${new Date(S.lastBackup).toLocaleDateString('vi-VN')}`;
+  el.innerHTML = `<div class="note ${days >= 7 ? 'warn' : ''}">Sao lưu gần nhất: ${when}${days >= 1 ? ` (${days} ngày trước)` : ''} · Hiện có ${active().length} người chơi, ${S.archive.length} buổi đã lưu trữ, ${nRounds} lượt.</div>`;
+}
+async function backupToFile(){
+  const now = new Date(), pad = n => String(n).padStart(2,'0');
+  const name = `caulong-saoluu-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.json`;
+  const data = {app:'caulong-xoayvong', version:1, exportedAt:now.toISOString(),
+    data:{players:S.players, settings:S.settings, rounds:S.rounds, archive:S.archive}};
+  const text = JSON.stringify(data);
+  const done = () => { S.lastBackup = Date.now(); save(); renderBackupInfo(); };
+  // Ưu tiên bảng chia sẻ của hệ điều hành (iPhone: “Lưu vào Tệp”; Android: Drive, Zalo…)
+  try{
+    const file = new File([text], name, {type:'application/json'});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:'Sao lưu xoay vòng cầu lông'});
+      done(); toast('Đã sao lưu'); return;
+    }
+  }catch(e){ if(e && e.name === 'AbortError') return; }
+  // Dự phòng: tải tệp xuống (máy tính, hoặc trình duyệt không hỗ trợ chia sẻ tệp)
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type:'application/json'}));
+  a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+  done(); toast('Đã tải tệp sao lưu xuống');
+}
+function restoreFromText(text){
+  let d;
+  try{ d = JSON.parse(text); }catch(e){ toast('Tệp không đọc được'); return; }
+  const v = d && d.app === 'caulong-xoayvong' ? d.data : null;
+  if(!v || !Array.isArray(v.players)){ toast('Đây không phải tệp sao lưu của app này'); return; }
+  const info = `${v.players.filter(p => !p.deleted).length} người chơi, ${(v.archive || []).length} buổi lưu trữ, ${(v.rounds || []).length} lượt của buổi đang dở`;
+  if(!confirm(`Khôi phục từ tệp (${info})?\nDữ liệu hiện tại trên máy này sẽ bị thay thế.`)) return;
+  const b = DEF();
+  S.players = v.players;
+  S.settings = Object.assign(b.settings, v.settings || {});
+  S.rounds = Array.isArray(v.rounds) ? v.rounds : [];
+  S.archive = Array.isArray(v.archive) ? v.archive : [];
+  S.timer = b.timer;
+  save(); applyTheme(); renderAll(); toast('Đã khôi phục dữ liệu');
+}
 function renderStatsTable(){
   const stats = computeStats();
   const inHist = new Set(); S.rounds.forEach(r => { r.courts.forEach(c => [...c.a,...c.b].forEach(id => inHist.add(id))); r.rest.forEach(id => inHist.add(id)); });
@@ -758,13 +892,13 @@ function deletePlayer(id){
 function setSeg(segSel, g){ document.querySelectorAll(segSel + ' button').forEach(b => b.classList.toggle('on', b.dataset.g === g)); }
 
 /* ================= CHIA SẺ ================= */
-function roundText(r){
+function roundText(r, nm = nameOf){
   const parts = r.courts.map((c, i) => {
-    let s = `Sân ${i+1}: ${nameOf(c.a[0])} + ${nameOf(c.a[1])} vs ${nameOf(c.b[0])} + ${nameOf(c.b[1])}`;
+    let s = `Sân ${i+1}: ${nm(c.a[0])} + ${nm(c.a[1])} vs ${nm(c.b[0])} + ${nm(c.b[1])}`;
     if(c.sa != null && c.sb != null) s += ` (${c.sa}–${c.sb})`;
     return s;
   });
-  return `Lượt ${r.n} – ${parts.join(' | ')} | Nghỉ: ${r.rest.length ? r.rest.map(nameOf).join(', ') : 'không ai'}`;
+  return `Lượt ${r.n} – ${parts.join(' | ')} | Nghỉ: ${r.rest.length ? r.rest.map(id => nm(id)).join(', ') : 'không ai'}`;
 }
 async function copyText(t){
   try{ await navigator.clipboard.writeText(t); toast('Đã sao chép – dán vào Zalo/Messenger'); }
@@ -835,13 +969,25 @@ document.addEventListener('click', e => {
     case 'doSwap': doSwap(id); break;
     case 'closeModal': closeModal(); break;
     case 'newSession':
-      if(confirm('Bắt đầu buổi mới? Toàn bộ lịch sử trận sẽ bị xoá, danh sách người chơi được giữ lại.')){
+      if(confirm(S.rounds.length
+          ? `Kết thúc buổi này (${S.rounds.length} lượt) và bắt đầu buổi mới?\nBuổi hiện tại sẽ được cất vào “Các buổi trước”.`
+          : 'Bắt đầu buổi mới?')){
+        const archived = archiveCurrent();
         S.rounds = [];
         S.players = S.players.filter(p => !p.deleted);
         S.players.forEach(p => p.off = 0);
-        resetTimer(false); save(); renderAll(); toast('Đã bắt đầu buổi mới');
+        resetTimer(false); save(); renderAll();
+        toast(archived ? 'Đã lưu trữ buổi cũ – nhớ “Sao lưu ra tệp” để giữ an toàn' : 'Đã bắt đầu buổi mới');
       }
       break;
+    case 'archCopy': { const a = S.archive.find(x => x.id === id); if(a) copyText(archiveText(a)); break; }
+    case 'archDel': {
+      const a = S.archive.find(x => x.id === id);
+      if(a && confirm(`Xoá vĩnh viễn buổi ${fmtDate(a.start)}?`)){ S.archive = S.archive.filter(x => x.id !== id); save(); renderAll(); }
+      break;
+    }
+    case 'backup': backupToFile(); break;
+    case 'restore': $('#restoreFile').value = ''; $('#restoreFile').click(); break;
   }
 });
 
@@ -869,7 +1015,17 @@ document.addEventListener('input', e => {
 $('#newName').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); document.querySelector('[data-act=addPlayer]').click(); } });
 if(window.matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if(S.settings.theme === 'auto') applyTheme(); });
 
+$('#restoreFile').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = () => restoreFromText(String(rd.result));
+  rd.onerror = () => toast('Không đọc được tệp');
+  rd.readAsText(f);
+});
+
 /* ================= KHỞI ĐỘNG ================= */
+// Xin trình duyệt giữ dữ liệu lâu dài (giảm nguy cơ bị tự xoá khi máy đầy bộ nhớ)
+try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 applyTheme();
 setTab(['players','round','stats'].includes(S.tab) ? S.tab : 'players');
 })();
